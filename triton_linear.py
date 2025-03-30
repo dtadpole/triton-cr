@@ -7,12 +7,17 @@ import math
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}),
+        # Configs for small/medium batch sizes
+        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=4),
+        # Configs for medium/large batch sizes with smaller output features
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
+        # Configs for large batch sizes and balanced dimensions
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 16}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 16}, num_stages=3, num_warps=8),
     ],
     key=['batch_size', 'in_features', 'out_features'],
 )
@@ -41,12 +46,10 @@ def linear_forward_kernel(
         in_features: number of columns in the input / weight
         out_features: number of rows in the weight / columns in the output
     """
-    # -----------------------------------------------------------
     # Matrix multiplication (M, K) @ (K, N) -> (M, N)
     # Input: (batch_size, in_features) [M, K]
     # Weight: (out_features, in_features) [N, K]
     # Output: (batch_size, out_features) [M, N]
-    # -----------------------------------------------------------
 
     # Program ID
     pid = tl.program_id(axis=0)
@@ -71,34 +74,54 @@ def linear_forward_kernel(
     mask_m = tm < batch_size
     mask_n = tn < out_features
 
-    # Pointers to input and output blocks
-    input_ptrs = input_ptr + tm[:, None] * input_batch_stride + tl.arange(0, BLOCK_SIZE_K)[None, :] * input_feature_stride
+    # Pointers to output blocks
     output_ptrs = output_ptr + tm[:, None] * output_batch_stride + tn[None, :] * output_feature_stride
 
-    # Initialize accumulator
+    # Initialize accumulator with higher precision for numerical stability
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-    # Loop over k dimension
-    for k in range(0, in_features, BLOCK_SIZE_K):
-        k_remaining = min(BLOCK_SIZE_K, in_features - k)
+    # Compute base pointers for input and weight blocks
+    input_block_ptr = input_ptr + tm[:, None] * input_batch_stride
+    weight_block_ptr = weight_ptr + tn[:, None] * weight_out_stride
 
-        # Compute pointers for current k block
-        weight_ptrs = weight_ptr + tn[:, None] * weight_out_stride + (k + tl.arange(0, BLOCK_SIZE_K))[None, :] * weight_in_stride
+    # Process first k block (prologue)
+    k = 0
+    mask_k = tl.arange(0, BLOCK_SIZE_K) < in_features
 
-        # Load input and weight blocks
-        # Transpose is handled by using the appropriate strides when loading weights
-        mask_k = (k + tl.arange(0, BLOCK_SIZE_K)) < in_features
+    # Load first input and weight blocks
+    a = tl.load(
+        input_block_ptr + tl.arange(0, BLOCK_SIZE_K)[None, :] * input_feature_stride,
+        mask=mask_m[:, None] & mask_k[None, :],
+        other=0.0
+    )
+    b = tl.load(
+        weight_block_ptr + tl.arange(0, BLOCK_SIZE_K)[None, :] * weight_in_stride,
+        mask=mask_n[:, None] & mask_k[None, :],
+        other=0.0
+    )
 
-        # Load input block (M, K)
-        a = tl.load(input_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
-        # Load weight block (N, K) -> transposed (K, N)
-        b = tl.load(weight_ptrs, mask=mask_n[:, None] & mask_k[None, :], other=0.0)
+    # Main loop with software pipelining
+    for k in range(BLOCK_SIZE_K, in_features, BLOCK_SIZE_K):
+        # Update mask for the next K block
+        mask_k = tl.arange(0, BLOCK_SIZE_K) + k < in_features
 
-        # Matrix multiplication for this k-block
+        # Compute dot product with current blocks while loading next blocks
         acc += tl.dot(a, tl.trans(b))
 
-        # Update pointers for next k iteration
-        input_ptrs += BLOCK_SIZE_K * input_feature_stride
+        # Load next blocks (prefetching)
+        a = tl.load(
+            input_block_ptr + (k + tl.arange(0, BLOCK_SIZE_K)[None, :]) * input_feature_stride,
+            mask=mask_m[:, None] & mask_k[None, :],
+            other=0.0
+        )
+        b = tl.load(
+            weight_block_ptr + (k + tl.arange(0, BLOCK_SIZE_K)[None, :]) * weight_in_stride,
+            mask=mask_n[:, None] & mask_k[None, :],
+            other=0.0
+        )
+
+    # Process final blocks (epilogue)
+    acc += tl.dot(a, tl.trans(b))
 
     # Store the result
     tl.store(output_ptrs, acc, mask=mask_m[:, None] & mask_n[None, :])
@@ -275,12 +298,13 @@ class LinearFunction(torch.autograd.Function):
         in_features = x.shape[1]
         out_features = weight.shape[0]
 
+        # For smaller batch sizes, continue using our optimized Triton implementation
         # Prepare output tensor
         output = torch.empty((batch_size, out_features), device=x.device, dtype=x.dtype)
 
         # Get tensor strides for input, weights and output
         input_batch_stride = x.stride(0)
-        input_feature_stride = x.stride(1) if x.dim() > 1 else 1
+        input_feature_stride = x.stride(1)
 
         weight_out_stride = weight.stride(0)
         weight_in_stride = weight.stride(1)
@@ -288,8 +312,10 @@ class LinearFunction(torch.autograd.Function):
         output_batch_stride = output.stride(0)
         output_feature_stride = output.stride(1)
 
-        # Launch kernel with autotuning
-        linear_forward_kernel[(triton.cdiv(batch_size, 128) * triton.cdiv(out_features, 128),)](
+        grid = lambda META: (triton.cdiv(batch_size, META['BLOCK_SIZE_M']) * triton.cdiv(out_features, META['BLOCK_SIZE_N']), )
+
+        # Launch kernel with calculated grid size
+        linear_forward_kernel[grid](
             x, weight, output,
             batch_size, in_features, out_features,
             input_batch_stride, input_feature_stride,
@@ -312,13 +338,51 @@ class LinearFunction(torch.autograd.Function):
         in_features = x.shape[1]
         out_features = weight.shape[0]
 
-        # For large batch sizes, use PyTorch's implementation which is more stable
-        if batch_size >= 512:
+        # For very large batch sizes, use PyTorch's native implementation
+        # which can be more efficient due to CUBLAS optimizations
+        if batch_size >= 2048:
             grad_input = torch.matmul(grad_output, weight)
             grad_weight = torch.matmul(grad_output.transpose(0, 1), x)
             return grad_input, grad_weight
 
-        # For smaller batch sizes, use our Triton kernel
+        # For large batch sizes, use a hybrid approach for backward dx
+        if batch_size >= 512:
+            # Use PyTorch's implementation for dx
+            grad_input = torch.matmul(grad_output, weight)
+
+            # Use Triton for dw calculation for large output dimensions
+            if out_features >= 512:
+                # Use our optimized Triton kernel for dw
+                grad_weight = torch.zeros((out_features, in_features), device=x.device, dtype=weight.dtype)
+
+                # Get tensor strides
+                grad_output_batch_stride = grad_output.stride(0)
+                grad_output_feature_stride = grad_output.stride(1)
+
+                input_batch_stride = x.stride(0)
+                input_feature_stride = x.stride(1)
+
+                grad_weight_out_stride = grad_weight.stride(0)
+                grad_weight_in_stride = grad_weight.stride(1)
+
+                # Efficient grid size for dw computation
+                grid_size = (triton.cdiv(out_features, 64) * triton.cdiv(in_features, 64),)
+
+                # Calculate gradient with respect to weights using Triton
+                linear_backward_dw_kernel[grid_size](
+                    grad_output, x, grad_weight,
+                    out_features, in_features, batch_size,
+                    grad_output_batch_stride, grad_output_feature_stride,
+                    input_batch_stride, input_feature_stride,
+                    grad_weight_out_stride, grad_weight_in_stride,
+                )
+            else:
+                # Use PyTorch for smaller output dimensions
+                grad_weight = torch.matmul(grad_output.transpose(0, 1), x)
+
+            return grad_input, grad_weight
+
+        # For smaller batch sizes, use our Triton kernel for dx
         # Prepare gradient tensors with correct shapes
         grad_input = torch.zeros((batch_size, in_features), device=x.device, dtype=x.dtype)
 

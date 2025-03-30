@@ -1,18 +1,9 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from linear import TritonLinear
+from triton_linear import TritonLinear
 from benchmark import verify_correctness_forward, benchmark_performance_forward
 
-
-class TorchLinear(nn.Module):
-    def __init__(self, in_features, out_features, device='cuda', dtype=torch.float16):
-        super().__init__()
-        self.weight = nn.Parameter(torch.empty((out_features, in_features), device=device, dtype=dtype))
-        nn.init.kaiming_uniform_(self.weight, a=5**0.5)
-
-    def forward(self, x):
-        return torch.nn.functional.linear(x, self.weight, bias=None)
 
 
 def module_generator(batch_size, in_features, out_features, device='cuda', dtype=torch.float16):
@@ -20,7 +11,7 @@ def module_generator(batch_size, in_features, out_features, device='cuda', dtype
     Generate Triton and PyTorch modules for comparison
     """
     triton_module = TritonLinear(in_features, out_features, device=device, dtype=dtype)
-    torch_module = TorchLinear(in_features, out_features, device=device, dtype=dtype)
+    torch_module = nn.Linear(in_features, out_features, bias=False, device=device, dtype=dtype)
     return triton_module, torch_module
 
 
@@ -40,7 +31,7 @@ def test_linear_forward():
     # Example test configuration
     batch_dims = [16, 64, 256, 1024]
     input_dims = [128, 512, 2048]
-    output_dims = [64, 256, 1024]
+    output_dims = [128, 512, 2048]
     dimensions = [batch_dims, input_dims, output_dims]
 
     print("Running correctness test (forward)...")

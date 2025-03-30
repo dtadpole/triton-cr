@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from linear import TritonLinear, LinearFunction
+from triton_linear import TritonLinear, LinearFunction
 import triton
 
 def test_large_batch_backward():

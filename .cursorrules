@@ -1,5 +1,7 @@
 Do not generate all the code at once, generate one function at a time.
 
+Do not do anything except what is directly related to what is being asked.
+
 When generating triton kernel, use autotune on triton kernel function when applicable.
 
 After each iteration of code is generated, use corresponding function in benchmark.py to verify correctness of the code.

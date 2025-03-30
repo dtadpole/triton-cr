@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 import triton
 import triton.testing
-from linear import TritonLinear, LinearFunction
+from triton_linear import TritonLinear, LinearFunction
 from benchmark import verify_correctness_backward, benchmark_performance_backward
 
 
