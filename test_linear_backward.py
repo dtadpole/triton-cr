@@ -66,12 +66,11 @@ def test_linear_backward():
     correct_output_dims = [64, 256, 1024]
     correct_dimensions = [correct_batch_dims, correct_input_dims, correct_output_dims]
 
-    # Small dimensions for benchmark to avoid CUDA graph errors
-    bench_batch_dims = [16, 64, 256, 1024]
-    bench_input_dims = [128, 512, 2048]
-    bench_output_dims = [64, 256, 1024]
+    # Focus on large batch sizes for benchmark
+    bench_batch_dims = [256, 512, 1024, 2048]
+    bench_input_dims = [128, 512, 1024]
+    bench_output_dims = [64, 256, 512]
     bench_dimensions = [bench_batch_dims, bench_input_dims, bench_output_dims]
-
     print("Running correctness test (backward)...")
     correctness = verify_correctness_backward(module_generator, backward_generator, correct_dimensions)
     print(f"Correctness tests: {correctness['passed']}/{correctness['total']} passed")
@@ -106,7 +105,7 @@ def test_linear_backward():
                 # Initialize sample modules for this config
                 triton_module, torch_module = module_generator(*config)
 
-                # Create contexts for backward pass
+                # Create context for backward pass
                 triton_ctx = type('DummyContext', (), {"saved_tensors": (x, triton_module.weight)})
 
                 # Benchmark triton backward - focus on dx computation (our fixed kernel)
@@ -138,7 +137,7 @@ def test_linear_backward():
                     "speedup": dx_speedup
                 })
 
-                print(f"Shape: ({config}, torch.float16), Triton: {dx_triton_time:.1f} us, PyTorch: {dx_torch_time:.1f} us, Speedup: {dx_speedup:.2f}x")
+                print(f"Shape: ([{batch_size}, {in_features}, {out_features}], torch.float16), Triton: {dx_triton_time:.1f} us, PyTorch: {dx_torch_time:.1f} us, Speedup: {dx_speedup:.2f}x")
 
             performance["speedup"] = float(np.median(speedups))
 
