@@ -116,7 +116,6 @@ def benchmark_performance_func(func_triton, func_torch, input_generator, dimensi
     """
     torch.manual_seed(0)
     configs = _generate_configs(dimensions)
-    pytorch_compiled = torch.compile(func_torch, mode="max-autotune")
 
     timings_triton = []
     timings_pytorch = []
@@ -135,7 +134,7 @@ def benchmark_performance_func(func_triton, func_torch, input_generator, dimensi
         _benchmark_implementations(
             config,
             lambda inputs: func_triton(*inputs) if isinstance(inputs, tuple) else func_triton(inputs),
-            lambda inputs: pytorch_compiled(*inputs) if isinstance(inputs, tuple) else pytorch_compiled(inputs),
+            lambda inputs: func_torch(*inputs) if isinstance(inputs, tuple) else func_torch(inputs),
             inputs,
             timings_triton,
             timings_pytorch,
