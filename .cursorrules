@@ -1,0 +1,9 @@
+Do not generate all the code at once, generate one function at a time.
+
+When generating triton kernel, use autotune on triton kernel function when applicable.
+
+After each iteration of code is generated, use corresponding function in benchmark.py to verify correctness of the code.
+
+Fix code until the code is correct, before starting work on the next function.
+
+When fixing issues, make minimum code changes wherever possible, do not change existing code paths that are not part of the dependencies.
