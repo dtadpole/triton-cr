@@ -2,7 +2,6 @@ import torch
 import triton
 import triton.language as tl
 
-
 # Create auto-tuned configurations
 @triton.autotune(
     configs=[
@@ -40,7 +39,7 @@ import triton.language as tl
     key=['M', 'N', 'K'],
 )
 @triton.jit
-def _matmul_kernel_autotune(
+def _matmul_kernel_by_m(
     # Pointers to matrices
     a_ptr, b_ptr, c_ptr,
     # Matrix dimensions
@@ -58,16 +57,6 @@ def _matmul_kernel_autotune(
     Auto-tuned version of the matrix multiplication kernel
     """
     # Program ID
-    pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + (pid % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
-
     # pid = tl.program_id(axis=0)
     # num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     # num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -77,6 +66,12 @@ def _matmul_kernel_autotune(
     # group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
     # pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     # pid_n = (pid % num_pid_in_group) // group_size_m
+
+    pid = tl.program_id(axis=0)
+    # pid_m = pid // tl.cdiv(N, BLOCK_SIZE_N)
+    # pid_n = pid % tl.cdiv(N, BLOCK_SIZE_N)
+    pid_n = pid // tl.cdiv(M, BLOCK_SIZE_M)
+    pid_m = pid % tl.cdiv(M, BLOCK_SIZE_M)
 
     # Create ranges for indices
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -133,11 +128,27 @@ def triton_matmul(a, b):
 
     # Launch the kernel with autotuned parameters
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
-    _matmul_kernel_autotune[grid](
+    _matmul_kernel_by_m[grid](
         a, b, c,
         M, N, K,
         a.stride(0), a.stride(1),
         b.stride(0), b.stride(1),
         c.stride(0), c.stride(1),
     )
+    # if M >= N:
+    #     _matmul_kernel_by_m[grid](
+    #         a, b, c,
+    #         M, N, K,
+    #         a.stride(0), a.stride(1),
+    #         b.stride(0), b.stride(1),
+    #         c.stride(0), c.stride(1),
+    #     )
+    # else:
+    #    _matmul_kernel_by_m[grid](
+    #        b, a, c,
+    #        N, M, K,
+    #        b.stride(1), b.stride(0),
+    #        a.stride(1), a.stride(0),
+    #        c.stride(1), c.stride(0),
+    #    )
     return c
